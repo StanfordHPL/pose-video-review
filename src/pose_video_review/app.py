@@ -185,6 +185,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    print(f"Loading {args.folder}...", flush=True)
     ViewerHandler.state = ViewerState(args.folder)
     server = ViewerServer((args.host, args.port), ViewerHandler)
     print(f"Pose Video Review: http://{args.host}:{args.port}")

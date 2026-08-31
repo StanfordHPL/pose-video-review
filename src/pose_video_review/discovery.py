@@ -15,6 +15,10 @@ import numpy as np
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mov", ".mp4"}
 
 
+def _progress(message: str) -> None:
+    print(message, flush=True)
+
+
 @lru_cache(maxsize=256)
 def _probe_frame_timestamps(path_value: str, file_size: int, modified_ns: int) -> tuple[float, ...]:
     """Return normalized presentation timestamps; size and mtime invalidate the cache."""
@@ -152,6 +156,65 @@ def _pose_type(path: Path) -> str:
     return "HRNet" if any("mmpose" in part.casefold() for part in path.parts) else "OpenPose"
 
 
+def _resolve_media(
+    videos_dir: Path, camera: str, trial: str, original_stem: str
+) -> tuple[Path, Path | None, Path | None] | None:
+    input_dir = videos_dir / camera / "InputMedia" / trial
+    if not input_dir.is_dir():
+        return None
+    videos = _video_files(input_dir)
+    originals = [
+        video for video in videos
+        if "sync" not in video.stem.casefold() and "rotated" not in video.stem.casefold()
+    ]
+    preferred = [video for video in originals if video.stem in {trial, original_stem}]
+    original = (preferred or originals or [None])[0]
+    sync = next((video for video in videos if "sync" in video.stem.casefold()), None)
+    video = sync or original
+    if video is None:
+        return None
+    return video, original, sync
+
+
+def _index_entry(
+    trial: str,
+    camera: str,
+    pose_path: Path,
+    video: Path,
+    original: Path | None,
+    sync: Path | None,
+) -> dict:
+    fps, width, height, _ = video_metadata(video)
+    timestamps = frame_timestamps(video)
+    frame_count = len(timestamps)
+    pose_width, pose_height = width, height
+    pose_frame_offset = 0
+    if original is not None:
+        _, pose_width, pose_height, _ = video_metadata(original)
+        if sync is not None:
+            _progress(f"Aligning {trial} {camera} sync video...")
+            pose_frame_offset = infer_sync_frame_offset(original, sync)
+    return {
+        "trial": trial,
+        "trialType": "neutral" if _is_neutral(trial) else "dynamic",
+        "camera": camera,
+        "videoPath": str(video.resolve()),
+        "posePath": str(pose_path.resolve()),
+        "poseType": _pose_type(pose_path),
+        "poseFrameOffset": pose_frame_offset,
+        "poseWidth": pose_width,
+        "poseHeight": pose_height,
+        "fps": fps,
+        "frameTimes": timestamps,
+        "frameTiming": "verified-pts",
+        "width": width,
+        "height": height,
+        "numFrames": frame_count,
+        "frameRange": [0, frame_count - 1],
+        "durationSeconds": timestamps[-1],
+    }
+
+
 def discover_session(path: Path) -> list[dict]:
     """Discover trials in one OpenCap session."""
     session_path = path.expanduser().resolve()
@@ -159,6 +222,7 @@ def discover_session(path: Path) -> list[dict]:
     if not videos_dir.is_dir():
         raise FileNotFoundError(f"OpenCap session has no Videos directory: {session_path}")
 
+    _progress(f"Scanning session {session_path.name}...")
     candidates: dict[tuple[str, str], tuple[int, Path, str]] = {}
     for camera_dir in sorted(videos_dir.glob("Cam*")):
         if not camera_dir.is_dir():
@@ -173,51 +237,24 @@ def discover_session(path: Path) -> list[dict]:
             if key not in candidates or priority > candidates[key][0]:
                 candidates[key] = (priority, pose_path, original_stem)
 
-    rows = []
+    pending: dict[str, list[tuple[str, Path, Path, Path | None, Path | None]]] = {}
     for (camera, trial), (_, pose_path, original_stem) in sorted(candidates.items()):
-        input_dir = videos_dir / camera / "InputMedia" / trial
-        if not input_dir.is_dir():
+        media = _resolve_media(videos_dir, camera, trial, original_stem)
+        if media is None:
             continue
-        videos = _video_files(input_dir)
-        originals = [
-            video for video in videos
-            if "sync" not in video.stem.casefold() and "rotated" not in video.stem.casefold()
-        ]
-        preferred = [video for video in originals if video.stem in {trial, original_stem}]
-        original = (preferred or originals or [None])[0]
-        sync = next((video for video in videos if "sync" in video.stem.casefold()), None)
-        video = sync or original
-        if video is None:
-            continue
+        video, original, sync = media
+        pending.setdefault(trial, []).append((camera, pose_path, video, original, sync))
 
-        fps, width, height, _ = video_metadata(video)
-        timestamps = frame_timestamps(video)
-        frame_count = len(timestamps)
-        pose_width, pose_height = width, height
-        pose_frame_offset = 0
-        if original is not None:
-            _, pose_width, pose_height, _ = video_metadata(original)
-            if sync is not None:
-                pose_frame_offset = infer_sync_frame_offset(original, sync)
-        rows.append({
-            "trial": trial,
-            "trialType": "neutral" if _is_neutral(trial) else "dynamic",
-            "camera": camera,
-            "videoPath": str(video.resolve()),
-            "posePath": str(pose_path.resolve()),
-            "poseType": _pose_type(pose_path),
-            "poseFrameOffset": pose_frame_offset,
-            "poseWidth": pose_width,
-            "poseHeight": pose_height,
-            "fps": fps,
-            "frameTimes": timestamps,
-            "frameTiming": "verified-pts",
-            "width": width,
-            "height": height,
-            "numFrames": frame_count,
-            "frameRange": [0, frame_count - 1],
-            "durationSeconds": timestamps[-1],
-        })
+    trial_names = sorted(pending)
+    video_count = sum(len(items) for items in pending.values())
+    _progress(f"Found {len(trial_names)} trials ({video_count} camera videos). Indexing...")
+
+    rows = []
+    for index, trial in enumerate(trial_names, start=1):
+        for camera, pose_path, video, original, sync in pending[trial]:
+            _progress(f"Indexing {index}/{len(trial_names)}: {trial} ({camera})")
+            rows.append(_index_entry(trial, camera, pose_path, video, original, sync))
+        _progress(f"Completed {index}/{len(trial_names)} trials: {trial}")
 
     if not rows:
         raise ValueError(
@@ -237,10 +274,13 @@ def discover_folder(path: Path) -> list[dict]:
     if not source_path.is_dir():
         raise FileNotFoundError(f"OpenCap folder does not exist: {source_path}")
 
+    _progress(f"Searching for OpenCap sessions in {source_path}...")
     session_paths = sorted({videos_dir.parent for videos_dir in source_path.rglob("Videos")})
+    _progress(f"Found {len(session_paths)} sessions")
     entries = []
     errors = []
-    for session_path in session_paths:
+    for index, session_path in enumerate(session_paths, start=1):
+        _progress(f"Session {index}/{len(session_paths)}: {session_path.name}")
         try:
             session_entries = discover_session(session_path)
         except (FileNotFoundError, ValueError) as exc:
