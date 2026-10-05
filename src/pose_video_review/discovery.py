@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from functools import lru_cache
@@ -152,8 +153,11 @@ def _pose_type(path: Path) -> str:
     return "HRNet" if any("mmpose" in part.casefold() for part in path.parts) else "OpenPose"
 
 
-def discover_session(path: Path) -> list[dict]:
-    """Discover trials in one OpenCap session."""
+def discover_session(path: Path, *, only_trials: set[str] | None = None) -> list[dict]:
+    """Discover trials in one OpenCap session.
+
+    *only_trials* skips indexing videos whose trial folder is not in the set.
+    """
     session_path = path.expanduser().resolve()
     videos_dir = session_path / "Videos"
     if not videos_dir.is_dir():
@@ -175,6 +179,8 @@ def discover_session(path: Path) -> list[dict]:
 
     rows = []
     for (camera, trial), (_, pose_path, original_stem) in sorted(candidates.items()):
+        if only_trials is not None and trial not in only_trials:
+            continue
         input_dir = videos_dir / camera / "InputMedia" / trial
         if not input_dir.is_dir():
             continue
@@ -254,3 +260,76 @@ def discover_folder(path: Path) -> list[dict]:
         detail = f" ({'; '.join(errors)})" if errors else ""
         raise ValueError(f"No usable OpenCap sessions found below: {source_path}{detail}")
     return entries
+
+
+def parse_trial_manifest(path: Path) -> list[tuple[str, str, str]]:
+    """Read ``session_path``, ``trial``, ``label`` lines from a text manifest.
+
+    Fields are separated by a tab, or by a run of two or more spaces. A single
+    space inside a path or label is kept. Blank lines and ``#`` comments are
+    ignored.
+    """
+    manifest = path.expanduser()
+    if not manifest.is_file():
+        raise FileNotFoundError(f"Trial list does not exist: {manifest}")
+    rows: list[tuple[str, str, str]] = []
+    for line_number, raw in enumerate(manifest.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "\t" in stripped:
+            fields = [field.strip() for field in stripped.split("\t")]
+        else:
+            fields = [field.strip() for field in re.split(r" {2,}", stripped)]
+            fields = [field for field in fields if field]
+        if len(fields) != 3 or not all(fields):
+            raise ValueError(
+                f"{manifest}:{line_number}: expected session_path, trial, and label"
+            )
+        rows.append((fields[0], fields[1], fields[2]))
+    if not rows:
+        raise ValueError(f"Trial list is empty: {manifest}")
+    return rows
+
+
+def discover_trial_list(path: Path) -> tuple[list[dict], list[str]]:
+    """Discover only the session/trial pairs in a manifest, in file order.
+
+    Missing sessions or trials are warnings. Videos that are not listed are not
+    indexed.
+    """
+    requested = parse_trial_manifest(path)
+    warnings: list[str] = []
+    by_session: dict[Path, set[str]] = {}
+    for session_text, trial, _label in requested:
+        session = Path(session_text).expanduser()
+        by_session.setdefault(session, set()).add(trial)
+
+    discovered: dict[Path, list[dict]] = {}
+    for session, trials in by_session.items():
+        if not session.is_dir():
+            warnings.append(f"session not found: {session}")
+            discovered[session] = []
+            continue
+        try:
+            discovered[session] = discover_session(session, only_trials=trials)
+        except (FileNotFoundError, ValueError) as exc:
+            warnings.append(f"{session}: {exc}")
+            discovered[session] = []
+
+    entries: list[dict] = []
+    for session_text, trial, label in requested:
+        session = Path(session_text).expanduser()
+        matches = [entry for entry in discovered.get(session, []) if entry["trial"] == trial]
+        if not matches:
+            warnings.append(f"trial not found: {trial} in {session}")
+            continue
+        for entry in sorted(matches, key=lambda item: item["camera"]):
+            labeled = dict(entry)
+            labeled["trial"] = label
+            labeled["id"] = str(len(entries))
+            entries.append(labeled)
+    if not entries:
+        detail = f" ({'; '.join(warnings)})" if warnings else ""
+        raise ValueError(f"No trials from {path}{detail}")
+    return entries, warnings

@@ -178,6 +178,12 @@ def parse_args() -> argparse.Namespace:
         default=Path.cwd(),
         help="OpenCap session or collection folder (default: current directory)",
     )
+    parser.add_argument(
+        "--trial-list",
+        type=Path,
+        default=None,
+        help="Text manifest of session_path, trial, and label (tab or wide-space separated)",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8877)
     return parser.parse_args()
@@ -185,11 +191,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    ViewerHandler.state = ViewerState(args.folder)
+    if args.trial_list is not None:
+        ViewerHandler.state = ViewerState(Path.cwd(), trial_list=args.trial_list)
+    else:
+        ViewerHandler.state = ViewerState(args.folder)
     server = ViewerServer((args.host, args.port), ViewerHandler)
     print(f"Pose Video Review: http://{args.host}:{args.port}")
     print(f"Source: {ViewerHandler.state.source}")
     print(f"Videos: {len(ViewerHandler.state.entries)} in {len(ViewerHandler.state.trials())} trials")
+    for warning in ViewerHandler.state.warnings:
+        print(f"Warning: {warning}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

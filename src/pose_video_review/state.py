@@ -5,14 +5,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .discovery import discover_folder
+from .discovery import discover_folder, discover_trial_list
 from .pose import POSE_EDGES, load_pose
 
 
 class ViewerState:
-    def __init__(self, source: Path):
-        self.source = source.expanduser().resolve()
-        self.entries = discover_folder(self.source)
+    def __init__(self, source: Path, *, trial_list: Path | None = None):
+        self.warnings: list[str] = []
+        self._list_order = trial_list is not None
+        if trial_list is not None:
+            self.source = Path.cwd().resolve()
+            self.entries, self.warnings = discover_trial_list(trial_list)
+        else:
+            self.source = source.expanduser().resolve()
+            self.entries = discover_folder(self.source)
         self.by_id = {entry["id"]: entry for entry in self.entries}
         self.offsets_path = self.source / "pose-video-offsets.json"
         self._pose_cache: dict[str, dict] = {}
@@ -71,16 +77,22 @@ class ViewerState:
 
     def trials(self) -> list[dict]:
         grouped: dict[str, list[dict]] = {}
+        order: list[str] = []
         for entry in self.entries:
-            grouped.setdefault(entry["trial"], []).append(entry)
+            trial = entry["trial"]
+            if trial not in grouped:
+                order.append(trial)
+                grouped[trial] = []
+            grouped[trial].append(entry)
+        keys = order if self._list_order else sorted(grouped)
         return [
             {
                 "id": trial,
-                "trialType": entries[0]["trialType"],
-                "cameraCount": len(entries),
-                "saveStatus": "saved" if all(entry["hasSavedOffset"] for entry in entries) else "unsaved",
+                "trialType": grouped[trial][0]["trialType"],
+                "cameraCount": len(grouped[trial]),
+                "saveStatus": "saved" if all(entry["hasSavedOffset"] for entry in grouped[trial]) else "unsaved",
             }
-            for trial, entries in sorted(grouped.items())
+            for trial in keys
         ]
 
     def trial_entries(self, trial: str) -> list[dict]:

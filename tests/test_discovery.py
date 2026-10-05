@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pose_video_review.discovery import discover_folder, discover_session, frame_timestamps
+from pose_video_review.discovery import (
+    discover_folder,
+    discover_session,
+    discover_trial_list,
+    frame_timestamps,
+)
+from pose_video_review.state import ViewerState
 
 
 METADATA = (60.0, 720, 1280, 120)
@@ -130,6 +136,48 @@ class DiscoveryTests(unittest.TestCase):
 
             self.assertEqual(entry["videoPath"], str(sync.resolve()))
             self.assertEqual(entry["poseFrameOffset"], 12)
+
+    def test_trial_list_keeps_manifest_order_and_skips_other_videos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session_a = root / "OpenCapData_a"
+            session_b = root / "session with spaces"
+            create_trial(session_a, trial="squat")
+            create_trial(session_a, trial="lunge")
+            create_trial(session_a, trial="other")
+            create_trial(session_b, trial="jump")
+            manifest = root / "manifest.txt"
+            manifest.write_text(
+                "\n".join([
+                    f"{session_a}\tsquat\tLabel one",
+                    f"{session_b}  jump  Label two",
+                    f"{session_a}\tlunge\tLabel three",
+                    f"{session_a}\tmissing\tLabel missing",
+                    "# comment",
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+            indexed: list[str] = []
+
+            def record_timestamps(path: Path):
+                indexed.append(path.name)
+                return FRAME_TIMES
+
+            with (
+                patch("pose_video_review.discovery.video_metadata", return_value=METADATA),
+                patch("pose_video_review.discovery.frame_timestamps", side_effect=record_timestamps),
+                patch("pose_video_review.state.Path.cwd", return_value=root),
+            ):
+                entries, warnings = discover_trial_list(manifest)
+                state = ViewerState(root, trial_list=manifest)
+
+            self.assertEqual([entry["trial"] for entry in entries], ["Label one", "Label two", "Label three"])
+            self.assertEqual([trial["id"] for trial in state.trials()], ["Label one", "Label two", "Label three"])
+            self.assertNotIn("other.mp4", indexed)
+            self.assertTrue(any("missing" in warning for warning in warnings))
+            self.assertEqual(state.offsets_path, root / "pose-video-offsets.json")
+            self.assertEqual(state.warnings, warnings)
 
     def test_reads_and_normalizes_ffprobe_frame_timestamps(self):
         with tempfile.TemporaryDirectory() as directory:
