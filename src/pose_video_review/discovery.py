@@ -273,7 +273,7 @@ def parse_trial_manifest(path: Path) -> list[tuple[str, str, str]]:
     if not manifest.is_file():
         raise FileNotFoundError(f"Trial list does not exist: {manifest}")
     rows: list[tuple[str, str, str]] = []
-    for line_number, raw in enumerate(manifest.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw in enumerate(manifest.read_text(encoding="utf-8-sig").splitlines(), start=1):
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -290,6 +290,18 @@ def parse_trial_manifest(path: Path) -> list[tuple[str, str, str]]:
     if not rows:
         raise ValueError(f"Trial list is empty: {manifest}")
     return rows
+
+
+def participant_from_label(label: str, trial: str) -> str:
+    """Return the participant when ``label`` is ``participant`` plus ``trial``.
+
+    The trial name is the trailing field. A label that does not end with that
+    trial name has no participant.
+    """
+    suffix = f" {trial}"
+    if trial and label.endswith(suffix):
+        return label[: -len(suffix)]
+    return ""
 
 
 def discover_trial_list(path: Path) -> tuple[list[dict], list[str]]:
@@ -326,6 +338,8 @@ def discover_trial_list(path: Path) -> tuple[list[dict], list[str]]:
             continue
         for entry in sorted(matches, key=lambda item: item["camera"]):
             labeled = dict(entry)
+            labeled["sourceTrial"] = trial
+            labeled["participant"] = participant_from_label(label, trial)
             labeled["trial"] = label
             labeled["id"] = str(len(entries))
             entries.append(labeled)

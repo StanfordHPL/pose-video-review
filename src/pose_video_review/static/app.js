@@ -21,6 +21,8 @@ const els = Object.fromEntries([
   "stepBackButton", "stepForwardButton", "timeSlider", "currentTime",
   "duration", "speedSelect", "loopPlayback", "tileSize", "tileSizeValue",
   "saveOffsetsButton", "trialTypeFilter", "saveFilter",
+  "markRoiStartButton", "markRoiEndButton", "clearRoiButton", "roiReadout",
+  "previousTrialButton", "nextTrialButton", "trialProgress",
 ].map((id) => [id, document.getElementById(id)]));
 
 const TILE_SIZE_STORAGE_KEY = "pose-video-review:tile-size";
@@ -55,8 +57,58 @@ function trialStatusLabel(trial) {
   return "Unsaved";
 }
 
+function roiStatusFromPayload(payload) {
+  if (!payload || payload.enabled === false) return null;
+  if (payload.start && payload.end) return "complete";
+  if (payload.start) return "start";
+  if (payload.end) return "end";
+  return "none";
+}
+
+function trialOptionLabel(trial) {
+  if (trial.roiStatus === "complete") return `✓ ${trial.id}`;
+  if (trial.roiStatus === "start") return `start only · ${trial.id}`;
+  if (trial.roiStatus === "end") return `end only · ${trial.id}`;
+  if (trial.roiStatus === "none") return trial.id;
+  return `${trial.id} · ${trial.cameraCount} cameras · ${trialStatusLabel(trial)}`;
+}
+
 function filteredTrials() {
   return filterTrials(state.trials, els.trialTypeFilter.value, els.saveFilter.value);
+}
+
+function updateTrialProgress() {
+  const trials = filteredTrials();
+  const index = trials.findIndex((trial) => trial.id === els.trialSelect.value);
+  const position = trials.length ? `${Math.max(index, 0) + 1} / ${trials.length}` : "0 / 0";
+  const marked = trials.filter((trial) => trial.roiStatus === "complete").length;
+  const partial = trials.filter((trial) => trial.roiStatus === "start" || trial.roiStatus === "end").length;
+  let text = position;
+  if (trials.some((trial) => trial.roiStatus)) {
+    text += ` · ${marked} ROI marked`;
+    if (partial) text += `, ${partial} incomplete`;
+  }
+  els.trialProgress.textContent = text;
+  const single = trials.length < 2;
+  els.previousTrialButton.disabled = single;
+  els.nextTrialButton.disabled = single;
+}
+
+function rememberRoiStatus(trialId, payload) {
+  const status = roiStatusFromPayload(payload);
+  const trial = state.trials.find((item) => item.id === trialId);
+  if (trial && status) trial.roiStatus = status;
+  renderTrialOptions(trialId);
+}
+
+function shiftTrial(direction) {
+  const trials = filteredTrials();
+  if (trials.length < 2) return;
+  const index = trials.findIndex((trial) => trial.id === els.trialSelect.value);
+  const start = index < 0 ? 0 : index;
+  const next = trials[(start + direction + trials.length) % trials.length];
+  els.trialSelect.value = next.id;
+  loadTrial(next.id).catch((error) => setStatus(error.message, true));
 }
 
 function renderTrialOptions(preferredId = els.trialSelect.value) {
@@ -77,11 +129,12 @@ function renderTrialOptions(preferredId = els.trialSelect.value) {
   for (const trial of trials) {
     const option = document.createElement("option");
     option.value = trial.id;
-    option.textContent = `${trial.id} · ${trial.cameraCount} cameras · ${trialStatusLabel(trial)}`;
+    option.textContent = trialOptionLabel(trial);
     els.trialSelect.append(option);
   }
   if (trials.some((trial) => trial.id === preferredId)) els.trialSelect.value = preferredId;
   els.trialSelect.disabled = trials.length === 0;
+  updateTrialProgress();
   return els.trialSelect.value || null;
 }
 
@@ -97,6 +150,7 @@ function showEmptyFilter() {
     "trials",
   ];
   setStatus(`No ${parts.filter(Boolean).join(" ")}`);
+  updateTrialProgress();
 }
 
 function setTileSize(value) {
@@ -302,9 +356,43 @@ function renderEntry(entry) {
   ctx.restore();
 }
 
+function sharedFrame() {
+  if (!state.entries.length) return 0;
+  return baseFrameAt(state.entries[0]);
+}
+
+function formatRoiBound(mark) {
+  if (!mark) return "—";
+  return `${Number(mark.time_s).toFixed(3)} s · frame ${mark.frame}`;
+}
+
+function renderRoiReadout() {
+  const mark = state.roiMarks;
+  els.roiReadout.textContent = `ROI start ${formatRoiBound(mark.start)} · end ${formatRoiBound(mark.end)}`;
+}
+
+function setRoiControlsVisible(enabled) {
+  for (const element of document.querySelectorAll("[data-roi-control]")) {
+    element.hidden = !enabled;
+  }
+}
+
+async function refreshRoiMarks(trialId = els.trialSelect.value) {
+  if (!trialId) return;
+  const payload = await getJson(`/api/roi-marks?id=${encodeURIComponent(trialId)}`);
+  state.roiMarks = payload;
+  setRoiControlsVisible(payload.enabled);
+  const canMark = payload.enabled && state.entries.length > 0;
+  els.markRoiStartButton.disabled = !canMark;
+  els.markRoiEndButton.disabled = !canMark;
+  els.clearRoiButton.disabled = !canMark || (!payload.start && !payload.end);
+  renderRoiReadout();
+}
+
 function render() {
   els.timeSlider.value = String(state.elapsed);
   els.currentTime.textContent = `${state.elapsed.toFixed(3)} s`;
+  renderRoiReadout();
   for (const entry of state.entries) renderEntry(entry);
 }
 
@@ -486,6 +574,9 @@ async function loadTrial(id) {
   els.timeSlider.step = "any";
   els.duration.textContent = `${state.duration.toFixed(3)} s`;
   seekVideos(true);
+  try { await refreshRoiMarks(id); }
+  catch (error) { setStatus(error.message, true); }
+  seekVideos(true);
   render();
 
   const poseResults = await Promise.all(state.entries.map(async (entry) => {
@@ -499,7 +590,6 @@ async function loadTrial(id) {
   }
   const available = poseResults.filter(([, poses]) => poses.available).length;
   setStatus(`${state.entries.length} cameras · pose data for ${available}`);
-  render();
 }
 
 function stopAtEnd() {
@@ -581,6 +671,8 @@ async function saveOffsets() {
 }
 
 els.trialSelect.addEventListener("change", () => loadTrial(els.trialSelect.value).catch((error) => setStatus(error.message, true)));
+els.previousTrialButton.addEventListener("click", () => shiftTrial(-1));
+els.nextTrialButton.addEventListener("click", () => shiftTrial(1));
 function applyTrialFilters() {
   const nextId = renderTrialOptions();
   if (nextId) loadTrial(nextId).catch((error) => setStatus(error.message, true));
@@ -591,6 +683,36 @@ els.trialTypeFilter.addEventListener("change", applyTrialFilters);
 els.saveFilter.addEventListener("change", applyTrialFilters);
 els.saveOffsetsButton.addEventListener("click", saveOffsets);
 els.tileSize.addEventListener("input", () => setTileSize(els.tileSize.value));
+async function markRoi(bound) {
+  pauseVideos();
+  try {
+    state.roiMarks = await postJson("/api/roi-marks", {
+      id: els.trialSelect.value,
+      bound,
+      time_s: state.elapsed,
+      frame: sharedFrame(),
+    });
+    els.clearRoiButton.disabled = false;
+    renderRoiReadout();
+    rememberRoiStatus(els.trialSelect.value, state.roiMarks);
+    setStatus(`Marked ROI ${bound}`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+els.markRoiStartButton.addEventListener("click", () => markRoi("start"));
+els.markRoiEndButton.addEventListener("click", () => markRoi("end"));
+els.clearRoiButton.addEventListener("click", async () => {
+  try {
+    state.roiMarks = await postJson("/api/roi-marks", { id: els.trialSelect.value, clear: true });
+    els.clearRoiButton.disabled = true;
+    renderRoiReadout();
+    rememberRoiStatus(els.trialSelect.value, state.roiMarks);
+    setStatus("Cleared ROI");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
 els.showPose.addEventListener("change", render);
 els.timeSlider.addEventListener("input", () => {
   pauseVideos();
@@ -632,9 +754,27 @@ window.addEventListener("keydown", (event) => {
 
 setTileSize(localStorage.getItem(TILE_SIZE_STORAGE_KEY) || els.tileSize.value);
 
-getJson("/api/trials").then(({ trials }) => {
+async function hydrateRoiStatus(trials) {
+  if (!state.roiMarks.enabled || trials.every((trial) => trial.roiStatus)) return;
+  await Promise.all(trials.map(async (trial) => {
+    if (trial.roiStatus) return;
+    const marks = await getJson(`/api/roi-marks?id=${encodeURIComponent(trial.id)}`);
+    trial.roiStatus = roiStatusFromPayload(marks);
+  }));
+}
+
+getJson("/api/roi-marks").then((payload) => {
+  state.roiMarks = payload;
+  setRoiControlsVisible(payload.enabled);
+  renderRoiReadout();
+  return getJson("/api/trials");
+}).catch(() => {
+  setRoiControlsVisible(false);
+  return getJson("/api/trials");
+}).then(async ({ trials }) => {
   state.trials = trials;
   if (!trials.length) throw new Error("No trials were found.");
+  await hydrateRoiStatus(trials);
   const firstId = renderTrialOptions();
   if (firstId) return loadTrial(firstId);
   showEmptyFilter();

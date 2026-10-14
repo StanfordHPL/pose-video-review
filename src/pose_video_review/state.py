@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from .discovery import discover_folder, discover_trial_list
 from .pose import POSE_EDGES, load_pose
+from .roi_marks import load_marks, save_marks
 
 
 class ViewerState:
@@ -21,6 +23,9 @@ class ViewerState:
             self.entries = discover_folder(self.source)
         self.by_id = {entry["id"]: entry for entry in self.entries}
         self.offsets_path = self.source / "pose-video-offsets.json"
+        self.roi_marks_path: Path | None = None
+        self._roi_marks: dict[tuple[str, str], dict[str, dict]] = {}
+        self._roi_lock = threading.Lock()
         self._pose_cache: dict[str, dict] = {}
         self._load_offsets()
 
@@ -75,6 +80,83 @@ class ViewerState:
         temporary.replace(self.offsets_path)
         return {"saved": len(updates), "path": str(self.offsets_path)}
 
+    def use_roi_marks(self, path: Path) -> None:
+        """Load ROI marks from *path* and save later edits there."""
+        self.roi_marks_path = path.expanduser().resolve()
+        with self._roi_lock:
+            self._roi_marks = load_marks(self.roi_marks_path)
+
+    def trial_identity(self, trial_id: str) -> tuple[str, str]:
+        """Return ``(participant, source trial)`` for a dropdown trial id."""
+        entries = self.trial_entries(trial_id)
+        if not entries:
+            raise KeyError(f"Unknown trial: {trial_id}")
+        entry = entries[0]
+        participant = str(entry.get("participant") or "")
+        trial = str(entry.get("sourceTrial") or trial_id)
+        return participant, trial
+
+    def roi_marks_payload(self, trial_id: str = "") -> dict:
+        """Marks for one trial, or only whether a marks file is configured."""
+        if self.roi_marks_path is None:
+            return {"enabled": False, "participant": "", "trial": "", "start": None, "end": None}
+        if not trial_id:
+            return {"enabled": True, "participant": "", "trial": "", "start": None, "end": None}
+        participant, trial = self.trial_identity(trial_id)
+        with self._roi_lock:
+            pair = dict(self._roi_marks.get((participant, trial), {}))
+        return {
+            "enabled": True,
+            "participant": participant,
+            "trial": trial,
+            "start": pair.get("start"),
+            "end": pair.get("end"),
+        }
+
+    def set_roi_mark(self, trial_id: str, bound: str, time_s: float, frame: int) -> dict:
+        """Store one shared-timeline bound and rewrite the marks file."""
+        if self.roi_marks_path is None:
+            raise ValueError("ROI marks file is not configured.")
+        if bound not in ("start", "end"):
+            raise ValueError("Bound must be start or end.")
+        time_value = float(time_s)
+        frame_value = int(frame)
+        if time_value < 0 or frame_value < 0:
+            raise ValueError("Time and frame must be zero or positive.")
+        participant, trial = self.trial_identity(trial_id)
+        with self._roi_lock:
+            pair = self._roi_marks.setdefault((participant, trial), {})
+            pair[bound] = {"time_s": time_value, "frame": frame_value}
+            save_marks(self.roi_marks_path, self._roi_marks)
+        return self.roi_marks_payload(trial_id)
+
+    def clear_roi_marks(self, trial_id: str) -> dict:
+        """Drop both bounds for one trial and rewrite the marks file."""
+        if self.roi_marks_path is None:
+            raise ValueError("ROI marks file is not configured.")
+        participant, trial = self.trial_identity(trial_id)
+        with self._roi_lock:
+            self._roi_marks.pop((participant, trial), None)
+            save_marks(self.roi_marks_path, self._roi_marks)
+        return self.roi_marks_payload(trial_id)
+
+    def roi_status(self, trial_id: str) -> str | None:
+        """``complete``, ``start``, ``end``, or ``none``. None when marks are not in use."""
+        if self.roi_marks_path is None:
+            return None
+        participant, trial = self.trial_identity(trial_id)
+        with self._roi_lock:
+            pair = dict(self._roi_marks.get((participant, trial), {}))
+        has_start = "start" in pair
+        has_end = "end" in pair
+        if has_start and has_end:
+            return "complete"
+        if has_start:
+            return "start"
+        if has_end:
+            return "end"
+        return "none"
+
     def trials(self) -> list[dict]:
         grouped: dict[str, list[dict]] = {}
         order: list[str] = []
@@ -91,6 +173,7 @@ class ViewerState:
                 "trialType": grouped[trial][0]["trialType"],
                 "cameraCount": len(grouped[trial]),
                 "saveStatus": "saved" if all(entry["hasSavedOffset"] for entry in grouped[trial]) else "unsaved",
+                "roiStatus": self.roi_status(trial),
             }
             for trial in keys
         ]

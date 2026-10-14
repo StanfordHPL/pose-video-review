@@ -77,6 +77,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "Unknown trial"}, HTTPStatus.NOT_FOUND)
             elif parsed.path == "/api/poses":
                 self.send_json(self.state.poses(query.get("id", [""])[0]))
+            elif parsed.path == "/api/roi-marks":
+                self.send_json(self.state.roi_marks_payload(query.get("id", [""])[0]))
             elif parsed.path == "/media":
                 self.serve_media(query)
             else:
@@ -88,18 +90,34 @@ class ViewerHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def read_json_object(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 1024 * 1024:
+            raise ValueError("Invalid request body size.")
+        payload = json.loads(self.rfile.read(length))
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be an object.")
+        return payload
+
     def do_POST(self) -> None:
         try:
-            if urlparse(self.path).path != "/api/offsets":
+            path = urlparse(self.path).path
+            payload = self.read_json_object()
+            if path == "/api/offsets":
+                self.send_json(self.state.save_offsets(payload.get("offsets")))
+            elif path == "/api/roi-marks":
+                trial_id = str(payload.get("id") or "")
+                if payload.get("clear"):
+                    self.send_json(self.state.clear_roi_marks(trial_id))
+                else:
+                    self.send_json(self.state.set_roi_mark(
+                        trial_id,
+                        str(payload.get("bound") or ""),
+                        payload.get("time_s"),
+                        payload.get("frame"),
+                    ))
+            else:
                 self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-                return
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 1024 * 1024:
-                raise ValueError("Invalid request body size.")
-            payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict):
-                raise ValueError("Request body must be an object.")
-            self.send_json(self.state.save_offsets(payload.get("offsets")))
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:
@@ -184,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Text manifest of session_path, trial, and label (tab or wide-space separated)",
     )
+    parser.add_argument(
+        "--roi-marks",
+        type=Path,
+        default=None,
+        help="Text file of shared-timeline ROI start and end marks",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8877)
     return parser.parse_args()
@@ -195,6 +219,9 @@ def main() -> None:
         ViewerHandler.state = ViewerState(Path.cwd(), trial_list=args.trial_list)
     else:
         ViewerHandler.state = ViewerState(args.folder)
+    if args.roi_marks is not None:
+        ViewerHandler.state.use_roi_marks(args.roi_marks)
+        print(f"ROI marks: {ViewerHandler.state.roi_marks_path}")
     server = ViewerServer((args.host, args.port), ViewerHandler)
     print(f"Pose Video Review: http://{args.host}:{args.port}")
     print(f"Source: {ViewerHandler.state.source}")

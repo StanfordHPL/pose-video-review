@@ -11,7 +11,10 @@
       <div class="brand">Pose Video Review</div>
       <label class="trial-field">
         <span>Trial</span>
+        <button id="previousTrialButton" type="button">Previous</button>
         <select id="trialSelect"></select>
+        <button id="nextTrialButton" type="button">Next</button>
+        <span id="trialProgress" class="trial-progress"></span>
       </label>
       <label class="filter-field">
         <span>Trial type</span>
@@ -44,10 +47,17 @@
         <button id="playButton" type="button">Play</button>
         <button id="stepBackButton" type="button" aria-label="Previous frame">−1</button>
         <button id="stepForwardButton" type="button" aria-label="Next frame">+1</button>
+        <button id="markRoiStartButton" type="button" data-roi-control hidden>Mark ROI start</button>
+        <button id="markRoiEndButton" type="button" data-roi-control hidden>Mark ROI end</button>
+        <button id="clearRoiButton" type="button" data-roi-control hidden>Clear ROI</button>
         <button id="saveOffsetsButton" type="button" disabled>Save offsets</button>
         <div class="scrubber">
           <input id="timeSlider" type="range" min="0" max="0" step="0.001" value="0">
-          <div class="time-readout"><span id="currentTime">0.000 s</span><span id="duration">0.000 s</span></div>
+          <div class="time-readout">
+            <span id="currentTime">0.000 s</span>
+            <span id="roiReadout" data-roi-control hidden>ROI —</span>
+            <span id="duration">0.000 s</span>
+          </div>
         </div>
         <label class="speed-field">
           <span>Speed</span>

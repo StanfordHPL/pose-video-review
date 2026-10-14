@@ -30,6 +30,9 @@ button, select, input { font: inherit; }
 }
 .brand { font-weight: 750; letter-spacing: -0.02em; font-size: 19px; }
 .trial-field { display: flex; align-items: center; gap: 9px; margin-left: auto; color: var(--muted); font-size: 13px; }
+.trial-field button { min-width: 0; }
+.trial-progress { font-variant-numeric: tabular-nums; white-space: nowrap; }
+button:disabled { cursor: default; opacity: 0.45; }
 .filter-field { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .tile-size-field { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .tile-size-field input { width: 120px; accent-color: var(--accent); }
@@ -96,7 +99,8 @@ main { padding: 20px 22px 112px; }
 }
 .scrubber { flex: 1; min-width: 150px; }
 .scrubber input { width: 100%; accent-color: var(--accent); }
-.time-readout { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.time-readout { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
+.time-readout #roiReadout { color: var(--accent); font-variant-numeric: tabular-nums; text-align: center; }
 .speed-field { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 760px) {
