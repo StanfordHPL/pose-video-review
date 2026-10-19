@@ -45,13 +45,21 @@
       <section id="cameraGrid" class="camera-grid"></section>
       <section class="transport" aria-label="Playback controls">
         <button id="playButton" type="button">Play</button>
-        <button id="stepBackButton" type="button" aria-label="Previous frame">−1</button>
-        <button id="stepForwardButton" type="button" aria-label="Next frame">+1</button>
+        <button id="stepBackButton" type="button" aria-label="Previous frame" title="Previous frame (Left arrow)">−1</button>
+        <button id="stepForwardButton" type="button" aria-label="Next frame" title="Next frame (Right arrow)">+1</button>
         <button id="markRoiStartButton" type="button" data-roi-control hidden>Mark ROI start</button>
         <button id="markRoiEndButton" type="button" data-roi-control hidden>Mark ROI end</button>
         <button id="clearRoiButton" type="button" data-roi-control hidden>Clear ROI</button>
+        <button id="goToRoiStartButton" type="button" data-roi-control hidden disabled title="Jump the scrubber to the marked ROI start">Go to S</button>
+        <button id="goToRoiEndButton" type="button" data-roi-control hidden disabled title="Jump the scrubber to the marked ROI end">Go to E</button>
+        <button id="resetOffsetsButton" type="button" disabled title="Put every camera offset back to its saved value">Reset offsets</button>
         <button id="saveOffsetsButton" type="button" disabled>Save offsets</button>
         <div class="scrubber">
+          <div class="scrubber-scale" aria-hidden="false">
+            <div id="roiSpan" class="roi-span" hidden></div>
+            <button id="roiStartTick" class="roi-tick roi-tick-start" type="button" hidden title="Go to ROI start">S</button>
+            <button id="roiEndTick" class="roi-tick roi-tick-end" type="button" hidden title="Go to ROI end">E</button>
+          </div>
           <input id="timeSlider" type="range" min="0" max="0" step="0.001" value="0">
           <div class="time-readout">
             <span id="currentTime">0.000 s</span>

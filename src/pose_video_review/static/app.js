@@ -20,8 +20,10 @@ const els = Object.fromEntries([
   "trialSelect", "showPose", "status", "cameraGrid", "playButton",
   "stepBackButton", "stepForwardButton", "timeSlider", "currentTime",
   "duration", "speedSelect", "loopPlayback", "tileSize", "tileSizeValue",
-  "saveOffsetsButton", "trialTypeFilter", "saveFilter",
-  "markRoiStartButton", "markRoiEndButton", "clearRoiButton", "roiReadout",
+  "saveOffsetsButton", "resetOffsetsButton", "trialTypeFilter", "saveFilter",
+  "markRoiStartButton", "markRoiEndButton", "clearRoiButton",
+  "goToRoiStartButton", "goToRoiEndButton", "roiReadout",
+  "roiStartTick", "roiEndTick", "roiSpan",
   "previousTrialButton", "nextTrialButton", "trialProgress",
 ].map((id) => [id, document.getElementById(id)]));
 
@@ -144,6 +146,7 @@ function showEmptyFilter() {
   state.entries = [];
   els.cameraGrid.innerHTML = "";
   els.saveOffsetsButton.disabled = true;
+  els.resetOffsetsButton.disabled = true;
   const parts = [
     els.saveFilter.value === "all" ? "" : els.saveFilter.value,
     els.trialTypeFilter.value === "all" ? "" : els.trialTypeFilter.value,
@@ -366,9 +369,79 @@ function formatRoiBound(mark) {
   return `${Number(mark.time_s).toFixed(3)} s · frame ${mark.frame}`;
 }
 
+function paintRoiBound(button, mark, emptyLabel, filledPrefix, setClass) {
+  const marked = Boolean(mark);
+  button.classList.toggle(setClass, marked);
+  button.textContent = marked ? `${filledPrefix} ${Number(mark.time_s).toFixed(3)} s` : emptyLabel;
+  button.title = marked ? `Marked at ${formatRoiBound(mark)}. Click to replace it.` : emptyLabel;
+}
+
+function placeRoiTick(tick, mark) {
+  if (!mark || !(state.duration > 0)) {
+    tick.hidden = true;
+    return;
+  }
+  const fraction = Math.max(0, Math.min(1, Number(mark.time_s) / state.duration));
+  tick.hidden = false;
+  tick.style.left = `${fraction * 100}%`;
+  tick.title = `Go to ${formatRoiBound(mark)}`;
+}
+
+function placeRoiSpan(start, end) {
+  if (!start || !end || !(state.duration > 0)) {
+    els.roiSpan.hidden = true;
+    return;
+  }
+  const left = Math.max(0, Math.min(Number(start.time_s), Number(end.time_s)));
+  const right = Math.min(state.duration, Math.max(Number(start.time_s), Number(end.time_s)));
+  els.roiSpan.hidden = false;
+  els.roiSpan.style.left = `${(left / state.duration) * 100}%`;
+  els.roiSpan.style.width = `${((right - left) / state.duration) * 100}%`;
+}
+
 function renderRoiReadout() {
-  const mark = state.roiMarks;
+  const mark = state.roiMarks || {};
   els.roiReadout.textContent = `ROI start ${formatRoiBound(mark.start)} · end ${formatRoiBound(mark.end)}`;
+  paintRoiBound(els.markRoiStartButton, mark.start, "Mark ROI start", "Start", "roi-set-start");
+  paintRoiBound(els.markRoiEndButton, mark.end, "Mark ROI end", "End", "roi-set-end");
+  placeRoiTick(els.roiStartTick, mark.start);
+  placeRoiTick(els.roiEndTick, mark.end);
+  placeRoiSpan(mark.start, mark.end);
+  els.goToRoiStartButton.disabled = !mark.start;
+  els.goToRoiEndButton.disabled = !mark.end;
+  paintRoiFrameCue();
+}
+
+function seekToRoiMark(mark) {
+  if (!mark || !state.entries.length) return;
+  pauseVideos();
+  const reference = state.entries[0];
+  const frame = Number(mark.frame);
+  const elapsed = reference.frameTimes?.[frame] ?? mark.time_s;
+  setElapsed(elapsed, true);
+}
+
+function paintRoiFrameCue() {
+  const mark = state.roiMarks || {};
+  const frame = state.entries.length ? sharedFrame() : null;
+  const onStart = frame !== null && mark.start && Number(mark.start.frame) === frame;
+  const onEnd = frame !== null && mark.end && Number(mark.end.frame) === frame;
+  const label = onStart && onEnd
+    ? "ROI Start (IC) · ROI End (TO)"
+    : onStart
+      ? "ROI Start (IC)"
+      : onEnd
+        ? "ROI End (TO)"
+        : "";
+  for (const tile of els.cameraGrid.querySelectorAll(".camera-tile")) {
+    tile.classList.toggle("roi-frame-start", Boolean(label) && onStart && !onEnd);
+    tile.classList.toggle("roi-frame-end", Boolean(label) && onEnd && !onStart);
+    tile.classList.toggle("roi-frame-both", Boolean(onStart && onEnd));
+    const badge = tile.querySelector(".roi-frame-badge");
+    if (!badge) continue;
+    badge.hidden = !label;
+    badge.textContent = label;
+  }
 }
 
 function setRoiControlsVisible(enabled) {
@@ -498,7 +571,11 @@ function buildTiles() {
     const overlay = document.createElement("canvas");
     overlay.dataset.entryId = entry.id;
     overlay.setAttribute("aria-hidden", "true");
-    stage.append(video, overlay);
+    const roiBadge = document.createElement("div");
+    roiBadge.className = "roi-frame-badge";
+    roiBadge.hidden = true;
+    roiBadge.setAttribute("aria-hidden", "true");
+    stage.append(video, overlay, roiBadge);
 
     const alignment = document.createElement("div");
     alignment.className = "alignment-control";
@@ -570,6 +647,7 @@ async function loadTrial(id) {
   buildTiles();
   els.saveOffsetsButton.disabled = false;
   els.saveOffsetsButton.classList.remove("unsaved");
+  els.resetOffsetsButton.disabled = false;
   els.timeSlider.max = String(state.duration);
   els.timeSlider.step = "any";
   els.duration.textContent = `${state.duration.toFixed(3)} s`;
@@ -642,6 +720,15 @@ async function startPlayback() {
   }
 }
 
+function resetOffsets() {
+  if (!state.entries.length) return;
+  for (const entry of state.entries) state.offsets.set(entry.id, loadOffset(entry));
+  els.saveOffsetsButton.classList.remove("unsaved");
+  seekVideos(true);
+  render();
+  setStatus("Restored camera offsets");
+}
+
 async function saveOffsets() {
   els.saveOffsetsButton.disabled = true;
   const offsets = state.entries.map((entry) => ({
@@ -682,6 +769,14 @@ function applyTrialFilters() {
 els.trialTypeFilter.addEventListener("change", applyTrialFilters);
 els.saveFilter.addEventListener("change", applyTrialFilters);
 els.saveOffsetsButton.addEventListener("click", saveOffsets);
+els.resetOffsetsButton.addEventListener("click", resetOffsets);
+function goToMarkedRoi(bound) {
+  seekToRoiMark(state.roiMarks?.[bound]);
+}
+els.roiStartTick.addEventListener("click", () => goToMarkedRoi("start"));
+els.roiEndTick.addEventListener("click", () => goToMarkedRoi("end"));
+els.goToRoiStartButton.addEventListener("click", () => goToMarkedRoi("start"));
+els.goToRoiEndButton.addEventListener("click", () => goToMarkedRoi("end"));
 els.tileSize.addEventListener("input", () => setTileSize(els.tileSize.value));
 async function markRoi(bound) {
   pauseVideos();
@@ -741,15 +836,31 @@ els.speedSelect.addEventListener("change", () => {
   }
 });
 window.addEventListener("resize", render);
+function hotkeysBlocked(target) {
+  if (target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) {
+    const type = String(target.type || "text").toLowerCase();
+    return type !== "range" && type !== "checkbox";
+  }
+  return false;
+}
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && document.querySelector(".camera-tile.focused")) {
     setFocusedTile(document.querySelector(".camera-tile.focused"), false);
     return;
   }
-  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
-  if (event.key === "ArrowLeft") els.stepBackButton.click();
-  if (event.key === "ArrowRight") els.stepForwardButton.click();
-  if (event.key === " ") { event.preventDefault(); els.playButton.click(); }
+  if (hotkeysBlocked(event.target)) return;
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    event.preventDefault();
+    if (event.key === "ArrowLeft") els.stepBackButton.click();
+    else els.stepForwardButton.click();
+    return;
+  }
+  if (event.key === " " && !(event.target instanceof HTMLButtonElement)) {
+    event.preventDefault();
+    els.playButton.click();
+  }
 });
 
 setTileSize(localStorage.getItem(TILE_SIZE_STORAGE_KEY) || els.tileSize.value);

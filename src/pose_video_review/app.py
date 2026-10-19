@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .discovery import configure_index_cache
 from .state import ViewerState
 
 
@@ -208,6 +209,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Text file of shared-timeline ROI start and end marks",
     )
+    parser.add_argument(
+        "--index-cache",
+        type=Path,
+        default=None,
+        help="Folder that stores frame timestamps and sync offsets for unchanged videos",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8877)
     return parser.parse_args()
@@ -215,6 +222,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.index_cache is not None:
+        configure_index_cache(args.index_cache)
+        print(f"Video index cache: {args.index_cache.resolve()}")
     if args.trial_list is not None:
         ViewerHandler.state = ViewerState(Path.cwd(), trial_list=args.trial_list)
     else:

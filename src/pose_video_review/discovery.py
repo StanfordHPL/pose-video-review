@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import subprocess
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,6 +16,58 @@ import numpy as np
 
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mov", ".mp4"}
+_INDEX_CACHE: Path | None = None
+_INDEX_LOCK = threading.Lock()
+
+
+def configure_index_cache(path: Path | None) -> None:
+    """Save frame timestamps and sync offsets under *path* for later launches."""
+    global _INDEX_CACHE
+    if path is None:
+        _INDEX_CACHE = None
+        return
+    cache = Path(path).expanduser().resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    _INDEX_CACHE = cache
+
+
+def _file_identity(path: Path) -> tuple[str, int, int]:
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    return str(resolved), int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def _cache_file(parts: tuple[object, ...]) -> Path | None:
+    if _INDEX_CACHE is None:
+        return None
+    digest = hashlib.sha256("\n".join(str(part) for part in parts).encode("utf-8")).hexdigest()
+    return _INDEX_CACHE / f"{digest}.json"
+
+
+def _read_cache(parts: tuple[object, ...], expected: dict[str, object]) -> dict | None:
+    dest = _cache_file(parts)
+    if dest is None or not dest.is_file():
+        return None
+    try:
+        payload = json.loads(dest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            return None
+    return payload
+
+
+def _write_cache(parts: tuple[object, ...], payload: dict) -> None:
+    dest = _cache_file(parts)
+    if dest is None:
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = dest.with_name(dest.name + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(dest)
 
 
 @lru_cache(maxsize=256)
@@ -57,6 +111,75 @@ def _probe_frame_timestamps(path_value: str, file_size: int, modified_ns: int) -
 def frame_timestamps(path: Path) -> list[float]:
     stat = path.stat()
     return list(_probe_frame_timestamps(str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+
+
+def _video_parts(identity: tuple[str, int, int]) -> tuple[object, ...]:
+    return ("video", *identity)
+
+
+def _video_expected(identity: tuple[str, int, int]) -> dict[str, object]:
+    path, size, mtime_ns = identity
+    return {"path": path, "size": size, "mtime_ns": mtime_ns}
+
+
+def cached_video_metadata(path: Path) -> tuple[float, int, int, int]:
+    """fps, width, height, and frame count, reused when the file is unchanged."""
+    identity = _file_identity(path)
+    with _INDEX_LOCK:
+        cached = _read_cache(_video_parts(identity), _video_expected(identity))
+    if cached and all(key in cached for key in ("fps", "width", "height", "frameCount")):
+        return float(cached["fps"]), int(cached["width"]), int(cached["height"]), int(cached["frameCount"])
+    fps, width, height, frame_count = video_metadata(path)
+    with _INDEX_LOCK:
+        current = _read_cache(_video_parts(identity), _video_expected(identity)) or {}
+        current.update(_video_expected(identity))
+        current.update({"fps": fps, "width": width, "height": height, "frameCount": frame_count})
+        _write_cache(_video_parts(identity), current)
+    return fps, width, height, frame_count
+
+
+def cached_frame_timestamps(path: Path) -> list[float]:
+    """Presentation timestamps, reused when the file is unchanged."""
+    identity = _file_identity(path)
+    with _INDEX_LOCK:
+        cached = _read_cache(_video_parts(identity), _video_expected(identity))
+    times = cached.get("frameTimes") if cached else None
+    if isinstance(times, list) and times:
+        return [float(value) for value in times]
+    print(f"Indexing frames: {path.name}", flush=True)
+    timestamps = frame_timestamps(path)
+    with _INDEX_LOCK:
+        current = _read_cache(_video_parts(identity), _video_expected(identity)) or {}
+        current.update(_video_expected(identity))
+        current["frameTimes"] = timestamps
+        _write_cache(_video_parts(identity), current)
+    return timestamps
+
+
+def cached_sync_offset(original: Path, sync: Path) -> int:
+    """Frame offset from the original video to the sync video, reused when both are unchanged."""
+    original_id = _file_identity(original)
+    sync_id = _file_identity(sync)
+    parts = ("sync-offset", *original_id, *sync_id)
+    expected = {
+        "originalPath": original_id[0],
+        "originalSize": original_id[1],
+        "originalMtimeNs": original_id[2],
+        "syncPath": sync_id[0],
+        "syncSize": sync_id[1],
+        "syncMtimeNs": sync_id[2],
+    }
+    with _INDEX_LOCK:
+        cached = _read_cache(parts, expected)
+    if cached is not None and "poseFrameOffset" in cached:
+        return int(cached["poseFrameOffset"])
+    print(f"Indexing sync offset: {sync.name}", flush=True)
+    offset = infer_sync_frame_offset(original, sync)
+    payload = dict(expected)
+    payload["poseFrameOffset"] = int(offset)
+    with _INDEX_LOCK:
+        _write_cache(parts, payload)
+    return offset
 
 
 def video_metadata(path: Path) -> tuple[float, int, int, int]:
@@ -196,15 +319,15 @@ def discover_session(path: Path, *, only_trials: set[str] | None = None) -> list
         if video is None:
             continue
 
-        fps, width, height, _ = video_metadata(video)
-        timestamps = frame_timestamps(video)
+        fps, width, height, _ = cached_video_metadata(video)
+        timestamps = cached_frame_timestamps(video)
         frame_count = len(timestamps)
         pose_width, pose_height = width, height
         pose_frame_offset = 0
         if original is not None:
-            _, pose_width, pose_height, _ = video_metadata(original)
+            _, pose_width, pose_height, _ = cached_video_metadata(original)
             if sync is not None:
-                pose_frame_offset = infer_sync_frame_offset(original, sync)
+                pose_frame_offset = cached_sync_offset(original, sync)
         rows.append({
             "trial": trial,
             "trialType": "neutral" if _is_neutral(trial) else "dynamic",

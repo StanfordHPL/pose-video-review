@@ -98,6 +98,50 @@ main { padding: 20px 22px 112px; }
   backdrop-filter: blur(18px);
 }
 .scrubber { flex: 1; min-width: 150px; }
+.scrubber-scale { position: relative; height: 16px; margin-bottom: 2px; }
+.roi-span {
+  position: absolute;
+  top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 176, 176, 0.85);
+  pointer-events: none;
+}
+.roi-tick {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  transform: translateX(-50%);
+}
+.roi-tick-start { background: #8C1515; border-color: #ffb4b4; color: #fff; }
+.roi-tick-end { background: #1f4e79; border-color: #b9d7f2; color: #fff; }
+button.roi-set-start { background: #8C1515; border-color: #ffb4b4; color: #fff; }
+button.roi-set-end { background: #1f4e79; border-color: #b9d7f2; color: #fff; }
+.camera-tile.roi-frame-start { box-shadow: 0 0 0 3px #8C1515; }
+.camera-tile.roi-frame-end { box-shadow: 0 0 0 3px #1f4e79; }
+.roi-frame-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+.camera-tile.roi-frame-start .roi-frame-badge,
+.camera-tile.roi-frame-both .roi-frame-badge { background: #8C1515; color: #fff; }
+.camera-tile.roi-frame-end .roi-frame-badge { background: #1f4e79; color: #fff; }
+.camera-tile.roi-frame-both { box-shadow: 0 0 0 3px #8C1515, 0 0 0 6px #1f4e79; }
 .scrubber input { width: 100%; accent-color: var(--accent); }
 .time-readout { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
 .time-readout #roiReadout { color: var(--accent); font-variant-numeric: tabular-nums; text-align: center; }
